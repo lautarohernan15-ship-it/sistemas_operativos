@@ -1,4 +1,6 @@
+import os
 from pathlib import Path
+
 
 class Proceso:
     def __init__(self, pid, tamano, arribo, irrupcion):
@@ -12,21 +14,30 @@ class Proceso:
         self.retorno = 0
         self.tiempo_comienzo = -1
 
+
 class Particion:
-    def __init__(self, id_particion, inicio, tamano):
+    def __init__(self, id_particion, inicio, tamano, pid=None):
         self.id = id_particion
-        self.inicio = inicio
+        self.inicio = int(inicio)
         self.tamano = int(tamano)
-        self.pid = None  # None si está libre, o el ID del proceso si está ocupada
+        self.pid = pid  # None si está libre, o el ID del proceso si está ocupada
         self.fragmentacion_interna = 0
 
+    @property
+    def fin(self):
+        return self.inicio + self.tamano - 1
+
+
 class Simulador:
+    ANCHO_UI = 84
+
     def __init__(self, archivo_procesos):
         self.tiempo_actual = 0
         self.procesos = []
+        self.memoria_so = 100
         self.memoria_total_usuario = 450
         self.particiones = []
-        
+
         # Colas de estados
         self.cola_nuevo = []
         self.cola_listo = []
@@ -34,9 +45,15 @@ class Simulador:
         self.cola_terminado = []
         self.proceso_ejecucion = None
 
+        # Registro de eventos del ciclo actual
+        self.eventos_ciclo = []
+        self.hubo_llegada_o_fin = False
+
         self.cargar_procesos(archivo_procesos)
-        # Inicializar con una única partición libre de 450K para usuarios (a partir de la dirección 100)
-        self.particiones.append(Particion(1, 100, self.memoria_total_usuario))
+        self.particiones.append(Particion(1, self.memoria_so, self.memoria_total_usuario))
+
+    def registrar_evento(self, categoria, mensaje):
+        self.eventos_ciclo.append((categoria, mensaje))
 
     def cargar_procesos(self, ruta):
         ruta = Path(ruta)
@@ -46,16 +63,23 @@ class Simulador:
             pass
         with open(ruta, 'r', encoding='utf-8') as f:
             for linea in f:
+                linea = linea.strip()
+                if not linea or linea.startswith('#'):
+                    continue
                 partes = [p.strip() for p in linea.split(',')]
                 if len(partes) == 4:
                     p = Proceso(partes[0], partes[1], partes[2], partes[3])
                     p.estado = "Nuevo"
                     self.procesos.append(p)
-        # Ordenar por tiempo de arribo inicial
+
         self.procesos.sort(key=lambda x: x.arribo)
 
+        if len(self.procesos) > 10:
+            print(f"[AVISO] El archivo tiene {len(self.procesos)} procesos. "
+                  f"Solo se permite un máximo de 10 (se tomarán los primeros 10).")
+            self.procesos = self.procesos[:10]
+
     def grado_multiprogramacion_activo(self):
-        # Cuenta Ejecución + Listo + Listo/Suspendido
         ejec = 1 if self.proceso_ejecucion else 0
         return ejec + len(self.cola_listo) + len(self.cola_listo_suspendido)
 
@@ -83,26 +107,29 @@ class Simulador:
 
             mejor_particion.pid = proceso.pid
             mejor_particion.fragmentacion_interna = 0
-            return True
-        return False
+            return mejor_particion
+        return None
 
     def liberar_memoria(self, pid):
         for p in self.particiones:
             if p.pid == pid:
                 p.pid = None
                 p.fragmentacion_interna = 0
-        
-        # Fusionar particiones libres adyacentes para evitar fragmentación externa
+
+        # Fusionar particiones libres adyacentes
         i = 0
         while i < len(self.particiones) - 1:
-            if self.particiones[i].pid is None and self.particiones[i+1].pid is None:
-                self.particiones[i].tamano += self.particiones[i+1].tamano
-                self.particiones.pop(i+1)
+            if self.particiones[i].pid is None and self.particiones[i + 1].pid is None:
+                self.particiones[i].tamano += self.particiones[i + 1].tamano
+                self.particiones.pop(i + 1)
             else:
                 i += 1
 
     def ejecutar_ciclo(self):
-        # 1. Registrar las llegadas para que permanezcan visibles en NUEVO este ciclo.
+        self.eventos_ciclo.clear()
+        self.hubo_llegada_o_fin = False
+
+        # 1. Registrar llegadas en el tiempo actual
         procesos_que_llegan_ahora = []
         for p in self.procesos:
             if (
@@ -116,192 +143,303 @@ class Simulador:
             ):
                 self.cola_nuevo.append(p)
                 procesos_que_llegan_ahora.append(p)
-                print(
-                    f"[LLEGADA] El proceso {p.pid} llega en T={self.tiempo_actual} "
-                    f"(tamaño: {p.tamano} KB, CPU: {p.irrupcion}). "
-                    "Ingresa a la cola NUEVO."
+                self.hubo_llegada_o_fin = True
+                self.registrar_evento(
+                    "LLEGADA",
+                    f"{p.pid} ingresa al sistema (Tam: {p.tamano} KB, CPU: {p.irrupcion}) -> Cola NUEVO."
                 )
 
-        # 2. Admitir procesos que ya estaban en NUEVO antes de este ciclo.
+        # 2. Admitir procesos que ya estaban en NUEVO antes de este ciclo
         while self.cola_nuevo:
             if self.cola_nuevo[0] in procesos_que_llegan_ahora:
                 break
 
             if self.grado_multiprogramacion_activo() >= 5:
-                print(
-                    "[ADMISIÓN] Se alcanzó el límite de multiprogramación (5). "
-                    "Los procesos restantes permanecen en la cola NUEVO."
+                self.registrar_evento(
+                    "LÍMITE MP",
+                    "Grado de multiprogramación al máximo (5/5). Restantes esperan en NUEVO."
                 )
                 break
 
             proc = self.cola_nuevo[0]
-            if self.asignar_memoria_best_fit(proc):
+            part_asignada = self.asignar_memoria_best_fit(proc)
+            if part_asignada:
                 self.cola_nuevo.pop(0)
                 proc.estado = "Listo"
                 self.cola_listo.append(proc)
-                print(
-                    f"[ADMISIÓN] El proceso {proc.pid} sale de NUEVO, "
-                    "obtiene memoria mediante Best-Fit y pasa a LISTOS."
+                self.registrar_evento(
+                    "ADMISIÓN",
+                    f"{proc.pid} obtiene RAM (Part. {part_asignada.id}: {part_asignada.inicio}-{part_asignada.fin}) por Best-Fit -> LISTOS."
                 )
             else:
                 self.cola_nuevo.pop(0)
                 proc.estado = "Listo/Suspendido"
                 self.cola_listo_suspendido.append(proc)
-                print(
-                    f"[MEMORIA] El proceso {proc.pid} sale de NUEVO, pero no hay "
-                    "un bloque contiguo suficiente; pasa a LISTOS/SUSPENDIDOS."
+                self.registrar_evento(
+                    "SUSPENSIÓN",
+                    f"{proc.pid} sale de NUEVO sin bloque contiguo de {proc.tamano} KB -> LISTOS/SUSPENDIDOS."
                 )
 
-        # 2.1 Intentar reubicar suspendidos si hay memoria libre
+        # 2.1 Intentar reubicar suspendidos en RAM si hay espacio
         i = 0
-        while i < len(self.cola_listo_suspendido) and self.grado_multiprogramacion_activo() < 5:
+        while i < len(self.cola_listo_suspendido):
             proc = self.cola_listo_suspendido[i]
-            if self.asignar_memoria_best_fit(proc):
+            part_asignada = self.asignar_memoria_best_fit(proc)
+            if part_asignada:
                 self.cola_listo_suspendido.pop(i)
                 proc.estado = "Listo"
                 self.cola_listo.append(proc)
-                print(
-                    f"[REINGRESO] El proceso {proc.pid} obtiene memoria libre "
-                    "y pasa de LISTOS/SUSPENDIDOS a LISTOS."
+                self.registrar_evento(
+                    "SWAP-IN",
+                    f"{proc.pid} obtiene RAM liberada ({part_asignada.inicio}-{part_asignada.fin}) -> Pasa a LISTOS."
                 )
             else:
                 i += 1
 
-        # 3. Planificación de CPU - SRTF (Shortest Remaining Time First)
+        # 3. Planificación de Corto Plazo - SRTF
         candidatos = self.cola_listo.copy()
         if self.proceso_ejecucion:
             candidatos.append(self.proceso_ejecucion)
 
         if candidatos:
-            # SRTF elige la menor CPU restante; en empate, conserva el criterio de llegada.
             candidatos.sort(key=lambda x: (x.restante, x.arribo))
             seleccionado = candidatos[0]
 
             if self.proceso_ejecucion and self.proceso_ejecucion.pid != seleccionado.pid:
-                proceso_desalojado = self.proceso_ejecucion
-                print(
-                    f"[SRTF - DESALOJO] El proceso {seleccionado.pid} "
-                    f"(CPU restante: {seleccionado.restante}) desaloja al proceso "
-                    f"{proceso_desalojado.pid} "
-                    f"(CPU restante: {proceso_desalojado.restante}), porque "
-                    f"{seleccionado.pid} necesita menos tiempo de CPU."
+                desalojado = self.proceso_ejecucion
+                self.registrar_evento(
+                    "DESALOJO",
+                    f"{seleccionado.pid} (Rest: {seleccionado.restante}) expropia la CPU a {desalojado.pid} (Rest: {desalojado.restante})."
                 )
-                self.proceso_ejecucion.estado = "Listo"
-                if self.proceso_ejecucion not in self.cola_listo:
-                    self.cola_listo.append(self.proceso_ejecucion)
+                desalojado.estado = "Listo"
+                if desalojado not in self.cola_listo:
+                    self.cola_listo.append(desalojado)
                 self.cola_listo.remove(seleccionado)
                 self.proceso_ejecucion = seleccionado
                 self.proceso_ejecucion.estado = "Ejecución"
+
             elif not self.proceso_ejecucion:
                 self.cola_listo.remove(seleccionado)
                 self.proceso_ejecucion = seleccionado
                 self.proceso_ejecucion.estado = "Ejecución"
-                print(
-                    f"[CPU - SRTF] La CPU estaba libre. El proceso {seleccionado.pid} "
-                    f"ingresa desde LISTOS con {seleccionado.restante} unidades "
-                    "de CPU restantes."
+                self.registrar_evento(
+                    "CPU / SRTF",
+                    f"CPU libre: ingresa {seleccionado.pid} desde LISTOS (Restante: {seleccionado.restante} u.t.)."
                 )
             elif len(candidatos) > 1:
-                print(
-                    f"[SRTF] Continúa {seleccionado.pid} en la CPU: tiene el menor "
-                    f"tiempo restante ({seleccionado.restante}) entre los procesos "
-                    "listos y el que estaba ejecutándose."
+                self.registrar_evento(
+                    "CPU / SRTF",
+                    f"Continúa {seleccionado.pid} en CPU por tener menor tiempo restante ({seleccionado.restante} u.t.)."
                 )
         else:
-            print("[CPU] No hay procesos listos para ejecutar; la CPU queda inactiva.")
+            self.registrar_evento("CPU IDLE", "No hay procesos en cola de LISTOS; procesador inactivo.")
 
-        # 4. Ejecución del proceso actual en CPU
+        # 4. Ejecución de 1 unidad de tiempo en CPU
         if self.proceso_ejecucion:
             if self.proceso_ejecucion.tiempo_comienzo == -1:
                 self.proceso_ejecucion.tiempo_comienzo = self.tiempo_actual
-                print(
-                    f"[EJECUCIÓN] Comienza el proceso {self.proceso_ejecucion.pid} "
-                    f"con {self.proceso_ejecucion.restante} unidades de CPU."
-                )
-            
+
             self.proceso_ejecucion.restante -= 1
-            print(
-                f"[EJECUCIÓN] El proceso {self.proceso_ejecucion.pid} utiliza "
-                f"1 unidad de CPU; le quedan {self.proceso_ejecucion.restante}."
+            self.registrar_evento(
+                "EJECUCIÓN",
+                f"{self.proceso_ejecucion.pid} ejecuta 1 u.t. de ráfaga (Restante: {self.proceso_ejecucion.restante} u.t.)."
             )
 
-            # Incrementar tiempo de espera para los que están en listas de listos
             for p in self.cola_listo:
                 p.espera += 1
 
-        # 5. Comprobar si el proceso en ejecución finalizó
+        # 5. Comprobar finalización del proceso activo
         if self.proceso_ejecucion and self.proceso_ejecucion.restante == 0:
             p_term = self.proceso_ejecucion
             p_term.estado = "Terminado"
             p_term.retorno = self.tiempo_actual + 1 - p_term.arribo
-            print(
-                f"[FINALIZACIÓN] El proceso {p_term.pid} completó su ejecución, "
-                "pasa a TERMINADOS y libera su memoria."
+            self.hubo_llegada_o_fin = True
+            self.registrar_evento(
+                "FIN PROCESO",
+                f"{p_term.pid} completó su ejecución -> Pasa a TERMINADOS y libera {p_term.tamano} KB."
             )
             self.liberar_memoria(p_term.pid)
             self.cola_terminado.append(p_term)
             self.proceso_ejecucion = None
 
-    def mostrar_salida(self):
-        print(f"\n==================================================")
-        print(f"               TIEMPO T = {self.tiempo_actual}")
-        print(f"==================================================")
-        proceso_actual = self.proceso_ejecucion.pid if self.proceso_ejecucion else 'Inactivo (Idle)'
-        print(f"Estado del Procesador (Ejecución): {proceso_actual}")
-        
-        print("\n[Tabla de Particiones de Memoria (MVT)]")
-        print(f"{'ID':<5} {'Dir. Inicio':<12} {'Tamaño (KB)':<12} {'Estado/PID':<18} {'Descripción'}")
-        print("-" * 75)
+    # =========================================================================
+    # INTERFAZ DE CONSOLA (GRILLA DE COLAS + TABLA CENTRADA)
+    # =========================================================================
+    def _imprimir_cola_grilla(self, titulo, items):
+        """
+        Dibuja la etiqueta de la cola con borde doble centrada y a su derecha
+        los procesos en casilleros de grilla con borde simple.
+        """
+        ancho_lbl = 22
+        top_lbl = f"  ╔{'═' * ancho_lbl}╗"
+        mid_lbl = f"  ║{titulo:^{ancho_lbl}}║"
+        bot_lbl = f"  ╚{'═' * ancho_lbl}╝"
+
+        if not items:
+            print(top_lbl)
+            print(f"{mid_lbl} ──> [ Vacía ]")
+            print(bot_lbl)
+            return
+
+        # Hasta 4 casilleros por fila para mantener el margen prolijo
+        max_por_fila = 4
+        filas = [items[i:i + max_por_fila] for i in range(0, len(items), max_por_fila)]
+
+        for idx_fila, fila in enumerate(filas):
+            # Cada casillero tiene el ancho del texto + 2 espacios internos
+            anchos = [len(texto) + 2 for texto in fila]
+
+            top_boxes = " ".join(f"┌{'─' * a}┐" for a in anchos)
+            bot_boxes = " ".join(f"└{'─' * a}┘" for a in anchos)
+
+            # El primer casillero recibe el conector "──┤", los siguientes tienen borde "│"
+            celdas_medio = []
+            for j, (texto, a) in enumerate(zip(fila, anchos)):
+                borde_izq = "┤" if j == 0 else "│"
+                celdas_medio.append(f"{borde_izq}{texto:^{a}}│")
+            mid_boxes = " ".join(celdas_medio)
+
+            if idx_fila == 0:
+                print(f"{top_lbl}   {top_boxes}")
+                print(f"{mid_lbl} ──{mid_boxes}")
+                print(f"{bot_lbl}   {bot_boxes}")
+            else:
+                sangria = " " * (ancho_lbl + 4)
+                print(f"{sangria}   {top_boxes}")
+                print(f"{sangria} ↳─{mid_boxes}")
+                print(f"{sangria}   {bot_boxes}")
+
+    def renderizar_dashboard(self):
+        w = self.ANCHO_UI
+        mp = self.grado_multiprogramacion_activo()
+
+        # 1. ENCABEZADO LIMPIO Y ESTADO DEL PROCESADOR EN LÍNEA
+        print("\n" + "═" * w)
+        titulo = "SIMULADOR DE MEMORIA (MVT) Y PLANIFICACIÓN (SRTF)"
+        print(f"{titulo:^{w}}")
+        print("═" * w)
+
+        info_tiempo = f"TIEMPO ACTUAL : T = {self.tiempo_actual}"
+        info_mp = f"MULTIPROGRAMACIÓN : {mp} / 5 procesos activos"
+        print(f"  {info_tiempo:<38} {info_mp}")
+
+        if self.proceso_ejecucion:
+            p = self.proceso_ejecucion
+            estado_cpu = f"En ejecución -> {p.pid} (Tamaño: {p.tamano} KB | Restante: {p.restante} de {p.irrupcion} u.t.)"
+        else:
+            estado_cpu = "Inactivo (Idle) -> Sin procesos en ejecución"
+
+        print(f"  ESTADO CPU    : {estado_cpu}")
+        print("─" * w)
+
+        # 2. TABLA DE PARTICIONES DE MEMORIA (Centrada con Dir. Inicio y Dir. Final)
+        c1, c2, c3, c4, c5, c6 = 6, 13, 13, 13, 16, 12
+        print("\n  > MAPA DE PARTICIONES DE MEMORIA (MVT - Best Fit | Total: 550 KB)")
+        print(f"  ┌{'─'*c1}┬{'─'*c2}┬{'─'*c3}┬{'─'*c4}┬{'─'*c5}┬{'─'*c6}┐")
+        print(f"  │{'ID':^{c1}}│{'Dir. Inicio':^{c2}}│{'Dir. Final':^{c3}}│{'Tamaño (KB)':^{c4}}│{'Estado / PID':^{c5}}│{'Frag. Int.':^{c6}}│")
+        print(f"  ├{'─'*c1}┼{'─'*c2}┼{'─'*c3}┼{'─'*c4}┼{'─'*c5}┼{'─'*c6}┤")
+
+        # Fila del Sistema Operativo (0 a 99)
+        print(f"  │{'SO':^{c1}}│{0:^{c2}}│{self.memoria_so - 1:^{c3}}│{self.memoria_so:^{c4}}│{'SISTEMA OP.':^{c5}}│{'0 KB':^{c6}}│")
+
         for part in self.particiones:
             if part.pid is None:
                 estado_str = "LIBRE"
-                descripcion = "Espacio vacío/restante"
+                frag_str = "---"
             else:
                 estado_str = f"Ocupado ({part.pid})"
-                descripcion = f"Asignado al proceso {part.pid}"
-            print(f"{part.id:<5} {part.inicio:<12} {part.tamano:<12} {estado_str:<18} {descripcion}")
+                frag_str = f"{part.fragmentacion_interna} KB"
 
-        print("\n[Estado de las Colas]")
-        print(f"Cola de NUEVO:               {[p.pid for p in self.cola_nuevo]}")
-        print(f"Cola de LISTOS:              {[p.pid for p in self.cola_listo]}")
-        print(f"Cola de LISTOS/SUSPENDIDOS:  {[p.pid for p in self.cola_listo_suspendido]}")
-        print(f"Cola de TERMINADOS:          {[p.pid for p in self.cola_terminado]}")
-        print("=" * 75)
+            print(
+                f"  │{part.id:^{c1}}│{part.inicio:^{c2}}│{part.fin:^{c3}}│"
+                f"{part.tamano:^{c4}}│{estado_str:^{c5}}│{frag_str:^{c6}}│"
+            )
+        print(f"  └{'─'*c1}┴{'─'*c2}┴{'─'*c3}┴{'─'*c4}┴{'─'*c5}┴{'─'*c6}┘")
+
+        # 3. ESTADO DE LAS COLAS DE PROCESOS (Variante B - Grilla con etiquetas diferenciadas)
+        print("\n  > ESTADO DE LAS COLAS DE PROCESOS")
+        nodos_nuevos = [f"{p.pid} ({p.tamano}KB)" for p in self.cola_nuevo]
+        nodos_listos = [f"{p.pid} (Rest:{p.restante})" for p in self.cola_listo]
+        nodos_susp = [f"{p.pid} ({p.tamano}KB)" for p in self.cola_listo_suspendido]
+        nodos_term = [f"{p.pid}" for p in self.cola_terminado]
+
+        self._imprimir_cola_grilla("Cola de NUEVOS", nodos_nuevos)
+        self._imprimir_cola_grilla("Cola de LISTOS", nodos_listos)
+        self._imprimir_cola_grilla("LISTOS / SUSPENDIDOS", nodos_susp)
+        self._imprimir_cola_grilla("Cola de TERMINADOS", nodos_term)
+
+        # 4. HISTORIAL DE MOVIMIENTOS DEL CICLO
+        print(f"\n  > HISTORIAL DE MOVIMIENTOS DEL CICLO (T = {self.tiempo_actual})")
+        total_ev = len(self.eventos_ciclo)
+        for idx, (tag, msg) in enumerate(self.eventos_ciclo):
+            conector = "└─" if idx == total_ev - 1 else "├─"
+            tag_fmt = f"[{tag}]"
+            print(f"   {conector} {tag_fmt:<14} {msg}")
+
+        print("─" * w)
 
     def iniciar_simulacion(self):
+        if not self.procesos:
+            print("No hay procesos cargados en 'procesos.txt'.")
+            return
+
+        print("═" * self.ANCHO_UI)
+        print("  MODO DE EJECUCIÓN DEL SIMULADOR")
+        print("═" * self.ANCHO_UI)
+        print("  [1] Paso a paso en cada unidad de tiempo (T=0, 1, 2...)")
+        print("  [2] Pausar solo en llegadas o finalizaciones de procesos (Criterio Guía)")
+        opcion = input("\n  Seleccione una opción (Enter para [1]): ").strip()
+        solo_eventos_guia = (opcion == "2")
+
         while len(self.cola_terminado) < len(self.procesos):
             self.ejecutar_ciclo()
-            self.mostrar_salida()
+
+            debe_mostrar = (not solo_eventos_guia) or self.hubo_llegada_o_fin or self.tiempo_actual == 0
+            if debe_mostrar:
+                self.renderizar_dashboard()
+                input("  Presione [Enter] para avanzar al siguiente ciclo...")
+
             self.tiempo_actual += 1
-            input("Presione [Enter] para avanzar al siguiente ciclo...")
 
         self.mostrar_informe_estadistico()
 
     def mostrar_informe_estadistico(self):
-        print("\n" + "="*50)
-        print("           INFORME ESTADÍSTICO FINAL")
-        print("="*50)
-        print(f"{'Proceso':<10} {'T. Retorno':<12} {'T. Espera':<10}")
-        
+        w = self.ANCHO_UI
+        c1, c2, c3, c4, c5 = 12, 16, 16, 16, 14
+
+        print("\n" + "═" * w)
+        print(f"{'INFORME ESTADÍSTICO FINAL DE LA SIMULACIÓN':^{w}}")
+        print("═" * w)
+
+        print(f"\n  ┌{'─'*c1}┬{'─'*c2}┬{'─'*c3}┬{'─'*c4}┬{'─'*c5}┐")
+        print(f"  │{'Proceso':^{c1}}│{'T. Arribo':^{c2}}│{'T. Irrupción':^{c3}}│{'T. Retorno':^{c4}}│{'T. Espera':^{c5}}│")
+        print(f"  ├{'─'*c1}┼{'─'*c2}┼{'─'*c3}┼{'─'*c4}┼{'─'*c5}┤")
+
         t_retorno_total = 0
         t_espera_total = 0
-        
+
         for p in self.cola_terminado:
-            print(f"{p.pid:<10} {p.retorno:<12} {p.espera:<10}")
+            print(
+                f"  │{p.pid:^{c1}}│{p.arribo:^{c2}}│{p.irrupcion:^{c3}}│"
+                f"{p.retorno:^{c4}}│{p.espera:^{c5}}│"
+            )
             t_retorno_total += p.retorno
             t_espera_total += p.espera
-            
+
+        print(f"  └{'─'*c1}┴{'─'*c2}┴{'─'*c3}┴{'─'*c4}┴{'─'*c5}┘")
+
         n = len(self.procesos)
-        print("-" * 50)
-        if n == 0:
-            print("No hay procesos cargados. Agregue procesos a procesos.txt.")
-            print("="*50)
-            return
-        print(f"Tiempo Promedio de Retorno: {t_retorno_total / n:.2f}")
-        print(f"Tiempo Promedio de Espera: {t_espera_total / n:.2f}")
+        prom_retorno = t_retorno_total / n
+        prom_espera = t_espera_total / n
         rendimiento = n / self.tiempo_actual
-        print(f"Rendimiento del Sistema (Throughput): {rendimiento:.2f} procesos/unidad de tiempo")
-        print("="*50)
+
+        print("\n  > MÉTRICAS GLOBALES DEL SISTEMA")
+        print(f"   ├─ Tiempo Total Simulado             : {self.tiempo_actual} unidades de tiempo")
+        print(f"   ├─ Tiempo Promedio de Retorno (TAT)  : {prom_retorno:.2f} unidades de tiempo")
+        print(f"   ├─ Tiempo Promedio de Espera (WT)    : {prom_espera:.2f} unidades de tiempo")
+        print(f"   └─ Rendimiento (Throughput)          : {rendimiento:.4f} procesos / unidad de tiempo")
+        print("═" * w + "\n")
+
 
 if __name__ == "__main__":
     sim = Simulador("procesos.txt")
