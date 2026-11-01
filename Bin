@@ -47,7 +47,8 @@ class Simulador:
 
         # Registro de eventos del ciclo actual
         self.eventos_ciclo = []
-        self.hubo_llegada_o_fin = False
+        self.hubo_llegada = False
+        self.hubo_fin = False
 
         self.cargar_procesos(archivo_procesos)
         self.particiones.append(Particion(1, self.memoria_so, self.memoria_total_usuario))
@@ -125,9 +126,9 @@ class Simulador:
             else:
                 i += 1
 
-    def ejecutar_ciclo(self):
+    def fase_llegadas(self):
         self.eventos_ciclo.clear()
-        self.hubo_llegada_o_fin = False
+        self.hubo_llegada = False
 
         # 1. Registrar llegadas en el tiempo actual
         for p in self.procesos:
@@ -141,11 +142,15 @@ class Simulador:
                 and p is not self.proceso_ejecucion
             ):
                 self.cola_nuevo.append(p)
-                self.hubo_llegada_o_fin = True
+                self.hubo_llegada = True
                 self.registrar_evento(
                     "LLEGADA",
                     f"{p.pid} ingresa al sistema (Tam: {p.tamano} KB, CPU: {p.irrupcion}) -> Cola NUEVO."
                 )
+
+    def fase_admision_y_ejecucion(self):
+        self.eventos_ciclo.clear()
+        self.hubo_fin = False
 
         # 2. Admitir procesos en NUEVO
         while self.cola_nuevo:
@@ -246,7 +251,7 @@ class Simulador:
             p_term.estado = "Terminado"
             p_term.retorno = self.tiempo_actual + 1 - p_term.arribo
             p_term.espera = p_term.retorno - p_term.irrupcion
-            self.hubo_llegada_o_fin = True
+            self.hubo_fin = True
             self.registrar_evento(
                 "FIN PROCESO",
                 f"{p_term.pid} completó su ejecución -> Pasa a TERMINADOS y libera {p_term.tamano} KB."
@@ -302,7 +307,7 @@ class Simulador:
                 print(f"{sangria} ↳─{mid_boxes}")
                 print(f"{sangria}   {bot_boxes}")
 
-    def renderizar_dashboard(self):
+    def renderizar_dashboard(self, fase=""):
         w = self.ANCHO_UI
         mp = self.grado_multiprogramacion_activo()
 
@@ -362,7 +367,7 @@ class Simulador:
         self._imprimir_cola_grilla("Cola de TERMINADOS", nodos_term)
 
         # 4. HISTORIAL DE MOVIMIENTOS DEL CICLO
-        print(f"\n  > HISTORIAL DE MOVIMIENTOS DEL CICLO (T = {self.tiempo_actual})")
+        print(f"\n  > HISTORIAL DE MOVIMIENTOS DEL CICLO (T = {self.tiempo_actual}) {fase}")
         total_ev = len(self.eventos_ciclo)
         for idx, (tag, msg) in enumerate(self.eventos_ciclo):
             conector = "└─" if idx == total_ev - 1 else "├─"
@@ -385,11 +390,24 @@ class Simulador:
         solo_eventos_guia = (opcion == "2")
 
         while len(self.cola_terminado) < len(self.procesos):
-            self.ejecutar_ciclo()
+            # FASE 1: registrar llegadas y mostrar NUEVO
+            self.fase_llegadas()
 
-            debe_mostrar = (not solo_eventos_guia) or self.hubo_llegada_o_fin or self.tiempo_actual == 0
+            if self.hubo_llegada:
+                self.renderizar_dashboard("- FASE 1: LLEGADA A NUEVO")
+                input("  Presione [Enter] para continuar con la admisión y ejecución...")
+
+            # FASE 2: admisión, SWAP-IN, SRTF y ejecución
+            self.fase_admision_y_ejecucion()
+
+            debe_mostrar = (
+                not solo_eventos_guia
+                or self.hubo_llegada
+                or self.hubo_fin
+                or self.tiempo_actual == 0
+            )
             if debe_mostrar:
-                self.renderizar_dashboard()
+                self.renderizar_dashboard("- FASE 2: ADMISIÓN Y EJECUCIÓN")
                 input("  Presione [Enter] para avanzar al siguiente ciclo...")
 
             self.tiempo_actual += 1
