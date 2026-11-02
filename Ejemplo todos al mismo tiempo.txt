@@ -1,6 +1,6 @@
 # Todos llegan en T=0; ráfagas diferentes para comparar SRTF
 # PID, tamaño_KB, tiempo_arribo, irrupcion_CPU
-R1,50,0,7
-R2,50,0,5
-R3,50,0,3
-R4,50,0,1
+P1,50,0,7
+P2,50,0,5
+P3,50,0,3
+P4,50,0,1

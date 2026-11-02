@@ -741,7 +741,7 @@ def mostrar_indicaciones():
         "INDICACIONES / FUNCIONAMIENTO",
         "",
         "EJECUCIÓN Y MENÚS",
-        "• Ejecute el programa con: python simulador.py",
+        "• Ejecute el programa con: python Bin.py",
         "• En el menú principal, consulte estas indicaciones, comience o salga.",
         "• En Comenzar, elija archivos guardados o cargue un archivo nuevo.",
         "• La carga nueva acepta procesos manuales o la ruta de un archivo .txt.",
