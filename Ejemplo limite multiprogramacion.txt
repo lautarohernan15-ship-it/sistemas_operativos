@@ -1,0 +1,8 @@
+# Seis procesos llegan juntos; el límite activo es cinco
+# PID, tamaño_KB, tiempo_arribo, irrupcion_CPU
+P1,40,0,6
+P2,50,0,5
+P3,60,0,4
+P4,70,0,3
+P5,80,0,2
+P6,90,0,1

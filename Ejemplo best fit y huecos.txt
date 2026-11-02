@@ -1,0 +1,8 @@
+# Llegadas y finalizaciones para observar asignación y liberación
+# PID, tamaño_KB, tiempo_arribo, irrupcion_CPU
+P1,120,0,3
+P2,80,0,5
+P3,100,1,2
+P4,60,2,4
+P5,90,4,2
+P6,140,5,3

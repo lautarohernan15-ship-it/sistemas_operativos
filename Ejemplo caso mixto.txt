@@ -1,0 +1,8 @@
+# Caso mixto: llegadas escalonadas, tamaños variados y ráfagas cortas/largas
+# PID, tamaño_KB, tiempo_arribo, irrupcion_CPU
+M1,130,0,6
+M2,90,1,2
+M3,160,2,5
+M4,70,3,1
+M5,110,5,4
+M6,80,7,2

@@ -1,5 +1,67 @@
 import os
+import sys
 from pathlib import Path
+
+
+def carpeta_base():
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def elegir_archivo_procesos():
+    base = carpeta_base()
+    opciones = []
+
+    principal = base / "procesos.txt"
+    if principal.is_file():
+        opciones.append(("procesos.txt (archivo principal)", principal))
+
+    for carpeta in (base, base / "ejemplos"):
+        if carpeta.is_dir():
+            for archivo in sorted(carpeta.glob("Ejemplo*.txt")):
+                opciones.append((archivo.stem.replace("_", " "), archivo))
+
+    while True:
+        print("\n" + "═" * 60)
+        print("  SELECCIÓN DE ARCHIVO DE PROCESOS")
+        print("═" * 60)
+
+        for i, (nombre, _) in enumerate(opciones, start=1):
+            print(f"  [{i}] {nombre}")
+
+        n_otro = len(opciones) + 1
+        print(f"  [{n_otro}] Ingresar la ruta de otro archivo .txt")
+
+        eleccion = input("\n  Seleccione una opción: ").strip()
+        if not eleccion.isdigit():
+            print("  Opción inválida.")
+            continue
+
+        n = int(eleccion)
+        if 1 <= n <= len(opciones):
+            return opciones[n - 1][1].resolve()
+
+        if n == n_otro:
+            ruta_ingresada = input("  Ruta del archivo .txt: ").strip()
+            if (
+                len(ruta_ingresada) >= 2
+                and ruta_ingresada[0] == ruta_ingresada[-1]
+                and ruta_ingresada[0] in ("'", '"')
+            ):
+                ruta_ingresada = ruta_ingresada[1:-1]
+            ruta = Path(ruta_ingresada)
+
+            if not ruta.is_absolute():
+                ruta = base / ruta
+
+            if ruta.suffix.lower() == ".txt" and ruta.is_file():
+                return ruta.resolve()
+
+            print(f"  [ERROR] '{ruta}' no existe o no es un .txt válido.")
+            continue
+
+        print("  Opción inválida.")
 
 
 class Proceso:
@@ -58,10 +120,6 @@ class Simulador:
 
     def cargar_procesos(self, ruta):
         ruta = Path(ruta)
-        if not ruta.is_absolute():
-            ruta = Path(__file__).resolve().parent / ruta
-        with open(ruta, 'a', encoding='utf-8'):
-            pass
         with open(ruta, 'r', encoding='utf-8') as f:
             for linea in f:
                 linea = linea.strip()
@@ -73,12 +131,14 @@ class Simulador:
                     p.estado = "Nuevo"
                     self.procesos.append(p)
 
-        self.procesos.sort(key=lambda x: x.arribo)
-
         if len(self.procesos) > 10:
+            descartados = ", ".join(p.pid for p in self.procesos[10:])
             print(f"[AVISO] El archivo tiene {len(self.procesos)} procesos. "
-                  f"Solo se permite un máximo de 10 (se tomarán los primeros 10).")
+                  f"Solo se permite un máximo de 10: se toman los primeros 10 "
+                  f"del archivo y se descarta: {descartados}.")
             self.procesos = self.procesos[:10]
+
+        self.procesos.sort(key=lambda x: x.arribo)
 
     def grado_multiprogramacion_activo(self):
         ejec = 1 if self.proceso_ejecucion else 0
@@ -148,10 +208,7 @@ class Simulador:
                     f"{p.pid} ingresa al sistema (Tam: {p.tamano} KB, CPU: {p.irrupcion}) -> Cola NUEVO."
                 )
 
-    def fase_admision_y_ejecucion(self):
-        self.eventos_ciclo.clear()
-        self.hubo_fin = False
-
+    def fase_admision(self):
         # 2. Admitir procesos en NUEVO
         while self.cola_nuevo:
             if self.grado_multiprogramacion_activo() >= 5:
@@ -195,6 +252,9 @@ class Simulador:
                 )
             else:
                 i += 1
+
+    def fase_cpu(self):
+        self.hubo_fin = False
 
         # 3. Planificación de Corto Plazo - SRTF
         candidatos = self.cola_listo.copy()
@@ -332,7 +392,7 @@ class Simulador:
 
         # 2. TABLA DE PARTICIONES DE MEMORIA (Centrada con Dir. Inicio y Dir. Final)
         c1, c2, c3, c4, c5, c6 = 6, 13, 13, 13, 16, 12
-        print("\n  > MAPA DE PARTICIONES DE MEMORIA (MVT - Best Fit | Total: 550 KB)")
+        print("\n  > MAPA DE PARTICIONES DE MEMORIA (MVT - Best Fit | SO: 100 KB + Usuario: 450 KB)")
         print(f"  ┌{'─'*c1}┬{'─'*c2}┬{'─'*c3}┬{'─'*c4}┬{'─'*c5}┬{'─'*c6}┐")
         print(f"  │{'ID':^{c1}}│{'Dir. Inicio':^{c2}}│{'Dir. Final':^{c3}}│{'Tamaño (KB)':^{c4}}│{'Estado / PID':^{c5}}│{'Frag. Int.':^{c6}}│")
         print(f"  ├{'─'*c1}┼{'─'*c2}┼{'─'*c3}┼{'─'*c4}┼{'─'*c5}┼{'─'*c6}┤")
@@ -340,7 +400,7 @@ class Simulador:
         # Fila del Sistema Operativo (0 a 99)
         print(f"  │{'SO':^{c1}}│{0:^{c2}}│{self.memoria_so - 1:^{c3}}│{self.memoria_so:^{c4}}│{'SISTEMA OP.':^{c5}}│{'0 KB':^{c6}}│")
 
-        for part in self.particiones:
+        for indice, part in enumerate(self.particiones, start=1):
             if part.pid is None:
                 estado_str = "LIBRE"
                 frag_str = "---"
@@ -349,7 +409,7 @@ class Simulador:
                 frag_str = f"{part.fragmentacion_interna} KB"
 
             print(
-                f"  │{part.id:^{c1}}│{part.inicio:^{c2}}│{part.fin:^{c3}}│"
+                f"  │{indice:^{c1}}│{part.inicio:^{c2}}│{part.fin:^{c3}}│"
                 f"{part.tamano:^{c4}}│{estado_str:^{c5}}│{frag_str:^{c6}}│"
             )
         print(f"  └{'─'*c1}┴{'─'*c2}┴{'─'*c3}┴{'─'*c4}┴{'─'*c5}┴{'─'*c6}┘")
@@ -357,7 +417,10 @@ class Simulador:
         # 3. ESTADO DE LAS COLAS DE PROCESOS (Variante B - Grilla con etiquetas diferenciadas)
         print("\n  > ESTADO DE LAS COLAS DE PROCESOS")
         nodos_nuevos = [f"{p.pid} ({p.tamano}KB)" for p in self.cola_nuevo]
-        nodos_listos = [f"{p.pid} (Rest:{p.restante})" for p in self.cola_listo]
+        listos_ordenados = sorted(
+            self.cola_listo, key=lambda p: (p.restante, p.arribo)
+        )
+        nodos_listos = [f"{p.pid} (Rest:{p.restante})" for p in listos_ordenados]
         nodos_susp = [f"{p.pid} ({p.tamano}KB)" for p in self.cola_listo_suspendido]
         nodos_term = [f"{p.pid}" for p in self.cola_terminado]
 
@@ -378,7 +441,7 @@ class Simulador:
 
     def iniciar_simulacion(self):
         if not self.procesos:
-            print("No hay procesos cargados en 'procesos.txt'.")
+            print("No hay procesos cargados en el archivo seleccionado.")
             return
 
         print("═" * self.ANCHO_UI)
@@ -397,17 +460,23 @@ class Simulador:
                 self.renderizar_dashboard("- FASE 1: LLEGADA A NUEVO")
                 input("  Presione [Enter] para continuar con la admisión y ejecución...")
 
-            # FASE 2: admisión, SWAP-IN, SRTF y ejecución
-            self.fase_admision_y_ejecucion()
+            # FASE 2: admisión y SWAP-IN
+            n_previos = len(self.eventos_ciclo)
+            self.fase_admision()
 
-            debe_mostrar = (
-                not solo_eventos_guia
-                or self.hubo_llegada
-                or self.hubo_fin
-                or self.tiempo_actual == 0
+            hubo_movimiento = any(
+                tag in ("ADMISIÓN", "SUSPENSIÓN", "SWAP-IN")
+                for tag, _ in self.eventos_ciclo[n_previos:]
             )
-            if debe_mostrar:
-                self.renderizar_dashboard("- FASE 2: ADMISIÓN Y EJECUCIÓN")
+            if hubo_movimiento and (not solo_eventos_guia or self.hubo_llegada):
+                self.renderizar_dashboard("- FASE 2: ADMISIÓN (NUEVO -> LISTOS)")
+                input("  Presione [Enter] para continuar con la planificación y ejecución...")
+
+            # FASE 3: planificación SRTF, ejecución y finalización
+            self.fase_cpu()
+
+            if (not solo_eventos_guia) or self.hubo_fin or self.tiempo_actual == 0:
+                self.renderizar_dashboard("- FASE 3: CPU (SRTF Y EJECUCIÓN)")
                 input("  Presione [Enter] para avanzar al siguiente ciclo...")
 
             self.tiempo_actual += 1
@@ -453,28 +522,5 @@ class Simulador:
 
 
 if __name__ == "__main__":
-    while True:
-        print("SELECCIÓN DE ARCHIVO DE PROCESOS")
-        print("  [1] Utilizar procesos.txt")
-        print("  [2] Ingresar la ruta de otro archivo .txt")
-        opcion = input("Seleccione una opción: ").strip()
-
-        if opcion == "1":
-            archivo_procesos = "procesos.txt"
-        elif opcion == "2":
-            archivo_procesos = input("Ruta del archivo .txt: ").strip()
-        else:
-            print("Opción inválida. Seleccione 1 o 2.")
-            continue
-
-        ruta_archivo = Path(archivo_procesos)
-        if not ruta_archivo.is_absolute():
-            ruta_archivo = Path(__file__).resolve().parent / ruta_archivo
-
-        if ruta_archivo.suffix.lower() != ".txt" or not ruta_archivo.is_file():
-            print(f"[ERROR] '{archivo_procesos}' no existe o no es un archivo .txt válido. Intente nuevamente.")
-            continue
-
-        sim = Simulador(archivo_procesos)
-        sim.iniciar_simulacion()
-        break
+    sim = Simulador(elegir_archivo_procesos())
+    sim.iniciar_simulacion()

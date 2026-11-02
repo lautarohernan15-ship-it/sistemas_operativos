@@ -1,0 +1,7 @@
+# Los tamaños superan la memoria de usuario disponible (450 KB)
+# PID, tamaño_KB, tiempo_arribo, irrupcion_CPU
+A,200,0,4
+B,180,0,5
+C,150,1,2
+D,100,2,3
+E,120,4,2
