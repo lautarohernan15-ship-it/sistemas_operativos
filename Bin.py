@@ -12,15 +12,25 @@ def carpeta_base():
 def elegir_archivo_procesos():
     base = carpeta_base()
     opciones = []
+    rutas_vistas = set()
 
     principal = base / "procesos.txt"
     if principal.is_file():
         opciones.append(("procesos.txt (archivo principal)", principal))
+        rutas_vistas.add(os.path.normcase(str(principal.resolve())))
 
     for carpeta in (base, base / "ejemplos"):
         if carpeta.is_dir():
-            for archivo in sorted(carpeta.glob("Ejemplo*.txt")):
-                opciones.append((archivo.stem.replace("_", " "), archivo))
+            archivos = sorted(
+                (archivo for archivo in carpeta.glob("*.txt")
+                 if archivo.stem.lower().startswith("ejemplo")),
+                key=lambda archivo: archivo.name.lower()
+            )
+            for archivo in archivos:
+                ruta_normalizada = os.path.normcase(str(archivo.resolve()))
+                if ruta_normalizada not in rutas_vistas:
+                    opciones.append((archivo.stem.replace("_", " "), archivo))
+                    rutas_vistas.add(ruta_normalizada)
 
     while True:
         print("\n" + "═" * 60)
@@ -30,38 +40,45 @@ def elegir_archivo_procesos():
         for i, (nombre, _) in enumerate(opciones, start=1):
             print(f"  [{i}] {nombre}")
 
-        n_otro = len(opciones) + 1
-        print(f"  [{n_otro}] Ingresar la ruta de otro archivo .txt")
+        print("  [0] Volver al menú anterior")
 
-        eleccion = input("\n  Seleccione una opción: ").strip()
+        eleccion = input("\n  Seleccione un archivo: ").strip()
         if not eleccion.isdigit():
             print("  Opción inválida.")
             continue
 
         n = int(eleccion)
+        if n == 0:
+            return None
         if 1 <= n <= len(opciones):
             return opciones[n - 1][1].resolve()
 
-        if n == n_otro:
-            ruta_ingresada = input("  Ruta del archivo .txt: ").strip()
-            if (
-                len(ruta_ingresada) >= 2
-                and ruta_ingresada[0] == ruta_ingresada[-1]
-                and ruta_ingresada[0] in ("'", '"')
-            ):
-                ruta_ingresada = ruta_ingresada[1:-1]
-            ruta = Path(ruta_ingresada)
-
-            if not ruta.is_absolute():
-                ruta = base / ruta
-
-            if ruta.suffix.lower() == ".txt" and ruta.is_file():
-                return ruta.resolve()
-
-            print(f"  [ERROR] '{ruta}' no existe o no es un .txt válido.")
-            continue
-
         print("  Opción inválida.")
+
+
+def solicitar_ruta_txt():
+    base = carpeta_base()
+    while True:
+        ruta_ingresada = input(
+            "  Ruta del archivo .txt (o 0 para volver): "
+        ).strip()
+        if ruta_ingresada == "0":
+            return None
+        if (
+            len(ruta_ingresada) >= 2
+            and ruta_ingresada[0] == ruta_ingresada[-1]
+            and ruta_ingresada[0] in ("'", '"')
+        ):
+            ruta_ingresada = ruta_ingresada[1:-1]
+        ruta = Path(ruta_ingresada).expanduser()
+        if not ruta.is_absolute():
+            ruta = base / ruta
+        if ruta.suffix.lower() != ".txt":
+            print("  [ERROR] El archivo debe tener extensión .txt.")
+        elif not ruta.is_file():
+            print(f"  [ERROR] No se encontró el archivo: {ruta}")
+        else:
+            return ruta.resolve()
 
 
 class Proceso:
@@ -75,6 +92,33 @@ class Proceso:
         self.espera = 0
         self.retorno = 0
         self.tiempo_comienzo = -1
+
+
+def validar_registro_proceso(linea, ids_vistos):
+    partes = [parte.strip() for parte in linea.split(",")]
+    if len(partes) != 4:
+        return None, "se esperaban cuatro campos separados por comas"
+
+    pid = partes[0]
+    if not pid:
+        return None, "el identificador no puede estar vacío"
+    if pid in ids_vistos:
+        return None, f"el identificador {pid} está repetido"
+
+    try:
+        tamano, arribo, irrupcion = (int(valor) for valor in partes[1:])
+    except ValueError:
+        return None, "tamaño, arribo e irrupción deben ser números enteros"
+
+    if not 1 <= tamano <= 450:
+        return None, "el tamaño debe estar entre 1 y 450 KB"
+    if arribo < 0:
+        return None, "el tiempo de arribo no puede ser negativo"
+    if irrupcion < 1:
+        return None, "la irrupción debe ser de al menos 1 unidad"
+
+    ids_vistos.add(pid)
+    return Proceso(pid, tamano, arribo, irrupcion), None
 
 
 class Particion:
@@ -93,7 +137,7 @@ class Particion:
 class Simulador:
     ANCHO_UI = 84
 
-    def __init__(self, archivo_procesos):
+    def __init__(self, archivo_procesos=None):
         self.tiempo_actual = 0
         self.procesos = []
         self.memoria_so = 100
@@ -112,7 +156,8 @@ class Simulador:
         self.hubo_llegada = False
         self.hubo_fin = False
 
-        self.cargar_procesos(archivo_procesos)
+        if archivo_procesos is not None:
+            self.cargar_procesos(archivo_procesos)
         self.particiones.append(Particion(1, self.memoria_so, self.memoria_total_usuario))
 
     def registrar_evento(self, categoria, mensaje):
@@ -120,23 +165,29 @@ class Simulador:
 
     def cargar_procesos(self, ruta):
         ruta = Path(ruta)
-        with open(ruta, 'r', encoding='utf-8') as f:
-            for linea in f:
+        ids_vistos = set()
+        procesos_validos = []
+        errores = []
+        with open(ruta, "r", encoding="utf-8-sig") as f:
+            for numero_linea, linea in enumerate(f, start=1):
                 linea = linea.strip()
                 if not linea or linea.startswith('#'):
                     continue
-                partes = [p.strip() for p in linea.split(',')]
-                if len(partes) == 4:
-                    p = Proceso(partes[0], partes[1], partes[2], partes[3])
-                    p.estado = "Nuevo"
-                    self.procesos.append(p)
+                proceso, error = validar_registro_proceso(linea, ids_vistos)
+                if error:
+                    errores.append(f"Línea {numero_linea}: {error}.")
+                else:
+                    procesos_validos.append(proceso)
 
-        if len(self.procesos) > 10:
-            descartados = ", ".join(p.pid for p in self.procesos[10:])
-            print(f"[AVISO] El archivo tiene {len(self.procesos)} procesos. "
-                  f"Solo se permite un máximo de 10: se toman los primeros 10 "
-                  f"del archivo y se descarta: {descartados}.")
-            self.procesos = self.procesos[:10]
+        for error in errores:
+            print(f"[ERROR] {error}")
+        if len(procesos_validos) > 10:
+            descartados = ", ".join(p.pid for p in procesos_validos[10:])
+            print(
+                f"[AVISO] Se conservan los primeros 10 procesos válidos; "
+                f"se descartan: {descartados}."
+            )
+        self.procesos = procesos_validos[:10]
 
         self.procesos.sort(key=lambda x: x.arribo)
 
@@ -224,9 +275,11 @@ class Simulador:
                 self.cola_nuevo.pop(0)
                 proc.estado = "Listo"
                 self.cola_listo.append(proc)
+                numero_particion = self.particiones.index(part_asignada) + 1
                 self.registrar_evento(
                     "ADMISIÓN",
-                    f"{proc.pid} obtiene RAM (Part. {part_asignada.id}: {part_asignada.inicio}-{part_asignada.fin}) por Best-Fit -> LISTOS."
+                    f"{proc.pid} obtiene RAM (Part. {numero_particion}: "
+                    f"{part_asignada.inicio}-{part_asignada.fin}) por Best-Fit -> LISTOS."
                 )
             else:
                 self.cola_nuevo.pop(0)
@@ -246,9 +299,11 @@ class Simulador:
                 self.cola_listo_suspendido.pop(i)
                 proc.estado = "Listo"
                 self.cola_listo.append(proc)
+                numero_particion = self.particiones.index(part_asignada) + 1
                 self.registrar_evento(
                     "SWAP-IN",
-                    f"{proc.pid} obtiene RAM liberada ({part_asignada.inicio}-{part_asignada.fin}) -> Pasa a LISTOS."
+                    f"{proc.pid} obtiene RAM en Part. {numero_particion} "
+                    f"({part_asignada.inicio}-{part_asignada.fin}) -> Pasa a LISTOS."
                 )
             else:
                 i += 1
@@ -262,7 +317,13 @@ class Simulador:
             candidatos.append(self.proceso_ejecucion)
 
         if candidatos:
-            candidatos.sort(key=lambda x: (x.restante, x.arribo))
+            candidatos.sort(
+                key=lambda x: (
+                    x.restante,
+                    x.arribo,
+                    0 if x is self.proceso_ejecucion else 1
+                )
+            )
             seleccionado = candidatos[0]
 
             if self.proceso_ejecucion and self.proceso_ejecucion.pid != seleccionado.pid:
@@ -305,20 +366,25 @@ class Simulador:
                 f"{self.proceso_ejecucion.pid} ejecuta 1 u.t. de ráfaga (Restante: {self.proceso_ejecucion.restante} u.t.)."
             )
 
-        # 5. Comprobar finalización del proceso activo
-        if self.proceso_ejecucion and self.proceso_ejecucion.restante == 0:
-            p_term = self.proceso_ejecucion
-            p_term.estado = "Terminado"
-            p_term.retorno = self.tiempo_actual + 1 - p_term.arribo
-            p_term.espera = p_term.retorno - p_term.irrupcion
-            self.hubo_fin = True
-            self.registrar_evento(
-                "FIN PROCESO",
-                f"{p_term.pid} completó su ejecución -> Pasa a TERMINADOS y libera {p_term.tamano} KB."
-            )
-            self.liberar_memoria(p_term.pid)
-            self.cola_terminado.append(p_term)
-            self.proceso_ejecucion = None
+        self.hubo_fin = bool(
+            self.proceso_ejecucion and self.proceso_ejecucion.restante == 0
+        )
+
+    def fase_finalizacion(self):
+        if not self.proceso_ejecucion or self.proceso_ejecucion.restante != 0:
+            return
+
+        proceso = self.proceso_ejecucion
+        proceso.estado = "Terminado"
+        proceso.retorno = self.tiempo_actual + 1 - proceso.arribo
+        proceso.espera = proceso.retorno - proceso.irrupcion
+        self.registrar_evento(
+            "FIN PROCESO",
+            f"{proceso.pid} pasa a TERMINADOS y libera {proceso.tamano} KB."
+        )
+        self.liberar_memoria(proceso.pid)
+        self.cola_terminado.append(proceso)
+        self.proceso_ejecucion = None
 
     # =========================================================================
     # INTERFAZ DE CONSOLA (GRILLA DE COLAS + TABLA CENTRADA)
@@ -442,14 +508,23 @@ class Simulador:
     def iniciar_simulacion(self):
         if not self.procesos:
             print("No hay procesos cargados en el archivo seleccionado.")
-            return
+            return False
 
         print("═" * self.ANCHO_UI)
         print("  MODO DE EJECUCIÓN DEL SIMULADOR")
         print("═" * self.ANCHO_UI)
         print("  [1] Se ejecuta paso a paso en cada unidad de tiempo (T= 0, 1, 2...)")
         print("  [2] Se pausa solo en llegadas o finalizaciones de procesos")
-        opcion = input("\n  Seleccione una opción (la tecla Enter lleva a [1]): ").strip()
+        print("  [0] Volver al menú principal")
+        while True:
+            opcion = input(
+                "\n  Seleccione una opción (Enter para [1]): "
+            ).strip()
+            if opcion in ("", "1", "2", "0"):
+                break
+            print("  Opción inválida. Seleccione 1, 2 o 0.")
+        if opcion == "0":
+            return False
         solo_eventos_guia = (opcion == "2")
 
         while len(self.cola_terminado) < len(self.procesos):
@@ -468,20 +543,32 @@ class Simulador:
                 tag in ("ADMISIÓN", "SUSPENSIÓN", "SWAP-IN")
                 for tag, _ in self.eventos_ciclo[n_previos:]
             )
-            if hubo_movimiento and (not solo_eventos_guia or self.hubo_llegada):
+            hubo_swap_in = any(
+                tag == "SWAP-IN" for tag, _ in self.eventos_ciclo[n_previos:]
+            )
+            if hubo_movimiento and (
+                not solo_eventos_guia or self.hubo_llegada or hubo_swap_in
+            ):
                 self.renderizar_dashboard("- FASE 2: ADMISIÓN (NUEVO -> LISTOS)")
                 input("  Presione [Enter] para continuar con la planificación y ejecución...")
 
-            # FASE 3: planificación SRTF, ejecución y finalización
+            # FASE 3: planificación SRTF y ejecución de una unidad
             self.fase_cpu()
 
             if (not solo_eventos_guia) or self.hubo_fin or self.tiempo_actual == 0:
                 self.renderizar_dashboard("- FASE 3: CPU (SRTF Y EJECUCIÓN)")
                 input("  Presione [Enter] para avanzar al siguiente ciclo...")
 
+            # FASE 4: finalización después de mostrar la ráfaga en cero
+            if self.hubo_fin:
+                self.fase_finalizacion()
+                self.renderizar_dashboard("- FASE 4: FINALIZACIÓN")
+                input("  Presione [Enter] para continuar...")
+
             self.tiempo_actual += 1
 
         self.mostrar_informe_estadistico()
+        return True
 
     def mostrar_informe_estadistico(self):
         w = self.ANCHO_UI
@@ -521,6 +608,220 @@ class Simulador:
         print("═" * w + "\n")
 
 
+def cargar_procesos_manualmente():
+    print("\n  Ingrese un proceso por línea: ID, tamaño, arribo, irrupción")
+    print("  Escriba 'fin' para terminar o 'cancelar' para volver.")
+    procesos = []
+    ids_vistos = set()
+
+    while len(procesos) < 10:
+        linea = input(f"  Proceso {len(procesos) + 1}: ").strip()
+        if linea.lower() in ("cancelar", "0"):
+            return None
+        if linea.lower() in ("fin", "listo") or not linea:
+            break
+        proceso, error = validar_registro_proceso(linea, ids_vistos)
+        if error:
+            print(f"  [ERROR] {error}. Intente nuevamente.")
+            continue
+        procesos.append(proceso)
+
+    if len(procesos) == 10:
+        print("  Se alcanzó el máximo de 10 procesos.")
+    procesos.sort(key=lambda proceso: proceso.arribo)
+    return procesos
+
+
+def guardar_procesos(procesos):
+    carpeta = carpeta_base() / "ejemplos"
+    try:
+        carpeta.mkdir(exist_ok=True)
+        numero = 0
+        while True:
+            nombre = "procesos.txt" if numero == 0 else f"procesos_{numero}.txt"
+            ruta = carpeta / nombre
+            try:
+                with open(ruta, "x", encoding="utf-8", newline="\n") as archivo:
+                    archivo.write(
+                        "# PID, tamaño_KB, tiempo_arribo, irrupcion_CPU\n"
+                    )
+                    for proceso in procesos:
+                        archivo.write(
+                            f"{proceso.pid},{proceso.tamano},"
+                            f"{proceso.arribo},{proceso.irrupcion}\n"
+                        )
+                print(f"  Archivo guardado en: {ruta}")
+                return ruta
+            except FileExistsError:
+                numero += 1
+    except OSError as error:
+        print(f"  [ERROR] No se pudo guardar el archivo: {error}")
+        return None
+
+
+def cargar_simulador(ruta=None, procesos=None):
+    try:
+        simulador = Simulador(ruta)
+    except (OSError, UnicodeError) as error:
+        print(f"  [ERROR] No se pudo leer el archivo: {error}")
+        return None
+
+    if procesos is not None:
+        simulador.procesos = procesos
+    if not simulador.procesos:
+        print("  [ERROR] No se encontraron procesos válidos.")
+        return None
+    return simulador
+
+
+def cargar_archivo_nuevo():
+    while True:
+        print("\n  CARGA DE ARCHIVO NUEVO")
+        print("  [1] Ingresar procesos manualmente")
+        print("  [2] Indicar la ruta de un archivo .txt")
+        print("  [0] Volver al menú anterior")
+        opcion = input("\n  Seleccione una opción: ").strip()
+
+        if opcion == "0":
+            return None
+        if opcion == "1":
+            procesos = cargar_procesos_manualmente()
+            if procesos is None:
+                return None
+            simulador = cargar_simulador(procesos=procesos)
+        elif opcion == "2":
+            ruta = solicitar_ruta_txt()
+            if ruta is None:
+                return None
+            simulador = cargar_simulador(ruta=ruta)
+        else:
+            print("  Opción inválida.")
+            continue
+
+        if simulador is None:
+            continue
+        guardar = input("  ¿Desea guardar los procesos en ejemplos/? [s/N]: ")
+        if guardar.strip().lower() in ("s", "si", "sí"):
+            guardar_procesos(simulador.procesos)
+        return simulador
+
+
+def comenzar_simulacion():
+    while True:
+        print("\n  COMENZAR")
+        print("  [1] Utilizar archivos guardados")
+        print("  [2] Cargar un archivo nuevo")
+        print("  [0] Volver al menú principal")
+        opcion = input("\n  Seleccione una opción: ").strip()
+
+        if opcion == "0":
+            return
+        if opcion == "1":
+            ruta = elegir_archivo_procesos()
+            if ruta is None:
+                continue
+            simulador = cargar_simulador(ruta=ruta)
+        elif opcion == "2":
+            simulador = cargar_archivo_nuevo()
+        else:
+            print("  Opción inválida.")
+            continue
+
+        if simulador is None:
+            continue
+        if simulador.iniciar_simulacion():
+            input(
+                "\n  [Enter] Salir de la simulación y volver al menú principal..."
+            )
+        return
+
+
+def mostrar_indicaciones():
+    lineas = [
+        "INDICACIONES / FUNCIONAMIENTO",
+        "",
+        "EJECUCIÓN Y MENÚS",
+        "• Ejecute el programa con: python simulador.py",
+        "• En el menú principal, consulte estas indicaciones, comience o salga.",
+        "• En Comenzar, elija archivos guardados o cargue un archivo nuevo.",
+        "• La carga nueva acepta procesos manuales o la ruta de un archivo .txt.",
+        "• Use 0 para volver al menú anterior; las opciones inválidas se repiten.",
+        "• Al terminar, pulse Enter para volver al menú principal.",
+        "",
+        "CARGA DE PROCESOS",
+        "• Formato: ID, tamaño_KB, tiempo_arribo, irrupcion_CPU",
+        "• Ejemplo: P1,80,0,5. Se ignoran líneas vacías y comentarios con #.",
+        "• El ID no se repite; tamaño: 1-450 KB; arribo: >= 0; CPU: >= 1.",
+        "• Se conservan los primeros 10 registros válidos y luego se ordenan",
+        "  por arribo; los empates conservan el orden del archivo.",
+        "• En carga manual, escriba 'fin' para terminar o 'cancelar' para volver.",
+        "• Puede escribir rutas con espacios, con o sin comillas.",
+        "• Si guarda, se usa ejemplos/ y nunca se reemplaza un archivo existente.",
+        "",
+        "MEMORIA MVT Y BEST-FIT",
+        "• El SO ocupa 100 KB; los procesos usan una memoria dinámica de 450 KB.",
+        "• Best-Fit asigna el hueco libre más pequeño que alcance para el proceso.",
+        "• La asignación es contigua: huecos separados no se suman.",
+        "• Si no hay un bloque suficiente, el proceso pasa a LISTOS/SUSPENDIDOS.",
+        "• Al liberar memoria, los huecos libres adyacentes se fusionan.",
+        "• SWAP-IN reubica suspendidos cuando existe un hueco contiguo disponible.",
+        "",
+        "PLANIFICACIÓN Y MULTIPROGRAMACIÓN",
+        "• SRTF ejecuta el proceso con menor tiempo de CPU restante.",
+        "• Un proceso más corto puede desalojar al que ocupa la CPU.",
+        "• En empate, se prioriza el menor tiempo de arribo.",
+        "• Cada ciclo ejecuta una unidad de tiempo; T avanza una sola vez.",
+        "• El máximo activo es 5: CPU, LISTOS y LISTOS/SUSPENDIDOS.",
+        "• NUEVOS no cuentan hasta ser admitidos.",
+        "",
+        "DASHBOARD E HISTORIAL",
+        "• Encabezado: tiempo actual, multiprogramación y estado de la CPU.",
+        "• Mapa: particiones de usuario, direcciones, tamaño y estado.",
+        "• Colas: NUEVOS, LISTOS, LISTOS/SUSPENDIDOS y TERMINADOS.",
+        "• LISTOS se ordena solo para mostrar: restante y luego arribo.",
+        "• El historial acumula los eventos del ciclo y sus fases.",
+        "• [LLEGADA]/[ADMISIÓN]: ingreso y asignación de memoria.",
+        "• [SUSPENSIÓN]/[SWAP-IN]: espera por memoria y reingreso a RAM.",
+        "• [LÍMITE MP]: se alcanzó el máximo de procesos activos.",
+        "• [CPU / SRTF]: selección o continuidad; [CPU IDLE]: procesador inactivo.",
+        "• [DESALOJO]: cambio de CPU por SRTF; [EJECUCIÓN]: 1 unidad de CPU.",
+        "• [FIN PROCESO]: liberación de memoria y paso a TERMINADOS.",
+        "• Las fases muestran NUEVO, admisión, CPU incluso con restante 0, y fin.",
+        "",
+        "MÉTRICAS",
+        "• Retorno (TAT): finalización menos tiempo de arribo.",
+        "• Espera (WT): retorno menos duración total de CPU.",
+        "• Los promedios resumen TAT y WT de todos los procesos terminados.",
+        "• Tiempo total: duración de la simulación desde T=0 hasta el último fin.",
+        "• Rendimiento: procesos terminados dividido tiempo total simulado.",
+    ]
+    print("\n" + "═" * Simulador.ANCHO_UI)
+    for linea in lineas:
+        print(linea)
+    print("═" * Simulador.ANCHO_UI)
+
+
+def menu_principal():
+    while True:
+        print("\n" + "═" * Simulador.ANCHO_UI)
+        print("  SIMULADOR MVT + BEST-FIT + SRTF")
+        print("  [1] Indicaciones / Funcionamiento")
+        print("  [2] Comenzar")
+        print("  [3] Salir del programa")
+        opcion = input("\n  Seleccione una opción: ").strip()
+
+        if opcion == "1":
+            mostrar_indicaciones()
+        elif opcion == "2":
+            comenzar_simulacion()
+        elif opcion == "3":
+            print("  Hasta luego.")
+            return
+        else:
+            print("  Opción inválida.")
+
+
 if __name__ == "__main__":
-    sim = Simulador(elegir_archivo_procesos())
-    sim.iniciar_simulacion()
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    menu_principal()
