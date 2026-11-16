@@ -1,6 +1,0 @@
-# PID, tamaño_KB, tiempo_arribo, irrupcion_CPU
-P1,120,2,3
-P2,130,10,4
-P3,40,10,1
-P4,60,14,2
-P5,90,20,2
